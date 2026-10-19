@@ -4,12 +4,15 @@ package kube
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/iwantm/IncidentLens/internal/events"
+	"github.com/iwantm/IncidentLens/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -30,6 +33,11 @@ type Watcher struct {
 	client    kubernetes.Interface
 	namespace string
 	store     ObservationStore
+	ready     atomic.Bool
+}
+
+func (w *Watcher) Ready() bool {
+	return w.ready.Load()
 }
 
 func NewWatcher(
@@ -113,6 +121,9 @@ func (w *Watcher) Run(ctx context.Context) error {
 		}
 		return fmt.Errorf("Kubernetes informer caches failed to sync")
 	}
+	w.ready.Store(true)
+	defer w.ready.Store(false)
+	slog.Info("Kubernetes watcher caches synchronized", "namespace", w.namespace)
 
 	<-ctx.Done()
 	return nil
@@ -122,6 +133,12 @@ func (w *Watcher) recordEvent(ctx context.Context, event *corev1.Event) {
 	if event == nil {
 		return
 	}
+	ctx, span := telemetry.StartSpan(ctx, "kubernetes.event.observe",
+		attribute.String("k8s.namespace.name", event.Namespace),
+		attribute.String("k8s.event.name", event.Name),
+	)
+	var saveErr error
+	defer func() { telemetry.EndSpan(span, saveErr) }()
 
 	observedAt := time.Now().UTC()
 	sourceVersion := event.ResourceVersion
@@ -161,11 +178,11 @@ func (w *Watcher) recordEvent(ctx context.Context, event *corev1.Event) {
 		},
 	}
 
-	if err := w.store.UpsertObservation(ctx, observation); err != nil {
-		log.Printf(
-			"save Kubernetes Event observation %s/%s: %v",
-			event.Namespace, event.Name, err,
-		)
+	if saveErr = w.store.UpsertObservation(ctx, observation); saveErr != nil {
+		telemetry.RecordObservation(ctx, "kubernetes_event", "error")
+		slog.ErrorContext(ctx, "failed to save Kubernetes Event observation", "namespace", event.Namespace, "event_name", event.Name, "error", saveErr)
+	} else {
+		telemetry.RecordObservation(ctx, "kubernetes_event", "success")
 	}
 }
 
@@ -177,6 +194,13 @@ func (w *Watcher) recordDeploymentChange(
 	if newDeployment == nil {
 		return
 	}
+	ctx, span := telemetry.StartSpan(ctx, "kubernetes.deployment.change.observe",
+		attribute.String("k8s.namespace.name", newDeployment.Namespace),
+		attribute.String("k8s.deployment.name", newDeployment.Name),
+		attribute.Int64("k8s.deployment.generation", newDeployment.Generation),
+	)
+	var saveErr error
+	defer func() { telemetry.EndSpan(span, saveErr) }()
 
 	observedAt := time.Now().UTC()
 	sourceID := string(newDeployment.UID)
@@ -207,11 +231,11 @@ func (w *Watcher) recordDeploymentChange(
 		},
 	}
 
-	if err := w.store.UpsertObservation(ctx, observation); err != nil {
-		log.Printf(
-			"save Deployment observation %s/%s: %v",
-			newDeployment.Namespace, newDeployment.Name, err,
-		)
+	if saveErr = w.store.UpsertObservation(ctx, observation); saveErr != nil {
+		telemetry.RecordObservation(ctx, "deployment_change", "error")
+		slog.ErrorContext(ctx, "failed to save Deployment observation", "namespace", newDeployment.Namespace, "deployment", newDeployment.Name, "error", saveErr)
+	} else {
+		telemetry.RecordObservation(ctx, "deployment_change", "success")
 	}
 }
 
