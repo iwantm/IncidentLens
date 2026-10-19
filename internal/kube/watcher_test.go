@@ -128,6 +128,7 @@ func TestRunWatchesInitialEventsAndDeploymentChanges(t *testing.T) {
 	if initial.Type != "kubernetes_event" {
 		t.Fatalf("initial observation type = %q, want kubernetes_event", initial.Type)
 	}
+	waitForReady(t, watcher)
 
 	updated := initialDeployment.DeepCopy()
 	updated.Generation = 2
@@ -149,6 +150,9 @@ func TestRunWatchesInitialEventsAndDeploymentChanges(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("watcher.Run() did not stop after context cancellation")
 	}
+	if watcher.Ready() {
+		t.Error("watcher remained ready after Run stopped")
+	}
 }
 
 func receiveObservation(t *testing.T, observations <-chan events.Observation) events.Observation {
@@ -160,4 +164,16 @@ func receiveObservation(t *testing.T, observations <-chan events.Observation) ev
 		t.Fatal("timed out waiting for watcher observation")
 		return events.Observation{}
 	}
+}
+
+func waitForReady(t *testing.T, watcher *Watcher) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if watcher.Ready() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("watcher did not become ready after caches synced")
 }

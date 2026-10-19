@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/iwantm/IncidentLens/internal/events"
+	"github.com/iwantm/IncidentLens/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -19,17 +21,32 @@ func NewEventStore(db *gorm.DB) *EventStore {
 	return &EventStore{db: db}
 }
 
+func (s *EventStore) Ping(ctx context.Context) (err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.database.ping")
+	defer func() { telemetry.EndSpan(span, err) }()
+	db, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	err = db.PingContext(ctx)
+	return err
+}
+
 func (s *EventStore) Create(
 	ctx context.Context,
 	event *events.Event,
-) error {
+) (err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.event.create", attribute.String("incident.id", event.IncidentID), attribute.String("event.id", event.ID))
+	defer func() { telemetry.EndSpan(span, err) }()
 	return s.db.WithContext(ctx).Create(event).Error
 }
 
 func (s *EventStore) CreateEvents(
 	ctx context.Context,
 	items []events.Event,
-) error {
+) (err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.events.create_batch", attribute.Int("events.count", len(items)))
+	defer func() { telemetry.EndSpan(span, err) }()
 	if len(items) == 0 {
 		return nil
 	}
@@ -43,7 +60,9 @@ func (s *EventStore) OpenIncident(
 	incident *events.Incident,
 	alert *events.Event,
 	backfillWindow time.Duration,
-) error {
+) (err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.incident.open", attribute.String("incident.id", incident.ID), attribute.String("incident.namespace", incident.Namespace))
+	defer func() { telemetry.EndSpan(span, err) }()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(incident).Error; err != nil {
 			return err
@@ -83,7 +102,9 @@ func (s *EventStore) ResolveIncident(
 	ctx context.Context,
 	incidentID string,
 	resolution *events.Event,
-) error {
+) (err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.incident.resolve", attribute.String("incident.id", incidentID), attribute.String("event.id", resolution.ID))
+	defer func() { telemetry.EndSpan(span, err) }()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		resolvedAt := resolution.Timestamp
 		result := tx.Model(&events.Incident{}).
@@ -114,9 +135,10 @@ func (s *EventStore) ResolveIncident(
 func (s *EventStore) GetIncident(
 	ctx context.Context,
 	incidentID string,
-) (events.Incident, error) {
-	var incident events.Incident
-	err := s.db.WithContext(ctx).First(&incident, "id = ?", incidentID).Error
+) (incident events.Incident, err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.incident.get", attribute.String("incident.id", incidentID))
+	defer func() { telemetry.EndSpan(span, err) }()
+	err = s.db.WithContext(ctx).First(&incident, "id = ?", incidentID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return incident, fmt.Errorf("%w: %s", events.ErrIncidentNotFound, incidentID)
 	}
@@ -126,21 +148,25 @@ func (s *EventStore) GetIncident(
 func (s *EventStore) ListByIncident(
 	ctx context.Context,
 	incidentID string,
-) ([]events.Event, error) {
-	events := make([]events.Event, 0)
+) (listed []events.Event, err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.incident.events.list", attribute.String("incident.id", incidentID))
+	defer func() { telemetry.EndSpan(span, err) }()
+	listed = make([]events.Event, 0)
 
-	err := s.db.WithContext(ctx).
+	err = s.db.WithContext(ctx).
 		Where("incident_id = ?", incidentID).
 		Order("timestamp ASC").
-		Find(&events).Error
+		Find(&listed).Error
 
-	return events, err
+	return listed, err
 }
 
 func (s *EventStore) UpsertObservation(
 	ctx context.Context,
 	observation *events.Observation,
-) error {
+) (err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.observation.upsert", attribute.String("observation.source", observation.Source), attribute.String("observation.source_id", observation.SourceID), attribute.String("observation.namespace", observation.Namespace))
+	defer func() { telemetry.EndSpan(span, err) }()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
@@ -192,10 +218,12 @@ func (s *EventStore) ListObservations(
 	ctx context.Context,
 	from time.Time,
 	to time.Time,
-) ([]events.Observation, error) {
-	observations := make([]events.Observation, 0)
+) (observations []events.Observation, err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.observations.list")
+	defer func() { telemetry.EndSpan(span, err) }()
+	observations = make([]events.Observation, 0)
 
-	err := s.db.WithContext(ctx).
+	err = s.db.WithContext(ctx).
 		Where("timestamp >= ? AND timestamp <= ?", from, to).
 		Order("timestamp ASC").
 		Find(&observations).Error
@@ -209,8 +237,10 @@ func (s *EventStore) ListObservationsBetween(
 	to time.Time,
 	namespace string,
 	service string,
-) ([]events.Observation, error) {
-	observations := make([]events.Observation, 0)
+) (observations []events.Observation, err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.observations.list_between", attribute.String("observation.namespace", namespace), attribute.String("observation.service", service))
+	defer func() { telemetry.EndSpan(span, err) }()
+	observations = make([]events.Observation, 0)
 
 	query := s.db.WithContext(ctx).
 		Where("timestamp >= ? AND timestamp <= ?", from, to)
@@ -222,7 +252,7 @@ func (s *EventStore) ListObservationsBetween(
 		query = query.Where("service = ?", service)
 	}
 
-	err := query.
+	err = query.
 		Order("timestamp ASC").
 		Find(&observations).Error
 

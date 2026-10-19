@@ -13,6 +13,7 @@ import (
 )
 
 type fakeEventStore struct {
+	pingErr    error
 	resolveErr error
 	openErr    error
 	createErr  error
@@ -22,6 +23,8 @@ type fakeEventStore struct {
 	event      events.Event
 	events     []events.Event
 }
+
+func (f *fakeEventStore) Ping(context.Context) error { return f.pingErr }
 
 func (f *fakeEventStore) Create(_ context.Context, event *events.Event) error {
 	f.event = *event
@@ -73,6 +76,39 @@ func TestCreateEventResolutionStatusCodes(t *testing.T) {
 				t.Fatalf("status = %d, want %d; body: %s", response.Code, tt.wantStatus, response.Body.String())
 			}
 		})
+	}
+}
+
+func TestHealthAndReadinessEndpoints(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		pingErr    error
+		wantStatus int
+	}{
+		{name: "liveness is healthy", path: "/healthz", wantStatus: http.StatusOK},
+		{name: "readiness when database responds", path: "/readyz", wantStatus: http.StatusOK},
+		{name: "readiness when database fails", path: "/readyz", pingErr: errors.New("database unavailable"), wantStatus: http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeEventStore{pingErr: tt.pingErr}
+			response := httptest.NewRecorder()
+			NewServer(store).Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, tt.path, nil))
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, tt.wantStatus, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestReadinessDependencyFailure(t *testing.T) {
+	readinessErr := errors.New("Kubernetes watcher caches are not synchronized")
+	handler := NewServer(&fakeEventStore{}, func(context.Context) error { return readinessErr }).Handler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
 	}
 }
 
