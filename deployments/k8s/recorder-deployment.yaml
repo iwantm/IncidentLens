@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recorder
+  namespace: incident-lens
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recorder
+  template:
+    metadata:
+      labels:
+        app: recorder
+    spec:
+      containers:
+        - name: recorder
+          image: incident-lens/recorder:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_PATH
+              value: /data/observations.db
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: recorder-data
+              mountPath: /data
+      serviceAccountName: incident-lens-recorder
+      volumes:
+        - name: recorder-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-lens-recorder
+  namespace: incident-lens
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: incident-lens-recorder
+  namespace: incident-lens
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: incident-lens-recorder
+  namespace: incident-lens
+subjects:
+  - kind: ServiceAccount
+    name: incident-lens-recorder
+    namespace: incident-lens
+roleRef:
+  kind: Role
+  name: incident-lens-recorder
+  apiGroup: rbac.authorization.k8s.io
