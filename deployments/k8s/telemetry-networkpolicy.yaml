@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-otlp-from-incident-lens
+  namespace: incident-lens-observability
+spec:
+  # Jaeger is the current in-cluster OTLP receiver. When it is replaced by an
+  # OpenTelemetry Collector gateway, change this selector to that workload's labels.
+  podSelector:
+    matchLabels:
+      app: jaeger
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: incident-lens-ui
+          podSelector:
+            matchLabels:
+              app: frontend
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: incident-lens
+          podSelector:
+            matchLabels:
+              app: recorder
+      ports:
+        - protocol: TCP
+          port: 4318
