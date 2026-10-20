@@ -18,6 +18,8 @@ spec:
           image: incident-lens/recorder:dev
           imagePullPolicy: IfNotPresent
           env:
+            - name: WATCH_NAMESPACE
+              value: incident-lens
             - name: DATABASE_PATH
               value: /data/observations.db
           ports:

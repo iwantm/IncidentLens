@@ -1,0 +1,22 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"DemoAppErrors\", namespace=\"incident-lens\"}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "incident-lens",
+  "groupLabels": {"alertname": "DemoAppErrors", "namespace": "incident-lens"},
+  "commonLabels": {"alertname": "DemoAppErrors", "namespace": "incident-lens", "service": "demo-app"},
+  "commonAnnotations": {"summary": "Demo app is returning errors"},
+  "externalURL": "http://alertmanager.local",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {"alertname": "DemoAppErrors", "namespace": "incident-lens", "service": "demo-app", "severity": "critical"},
+      "annotations": {"summary": "Demo app is returning errors", "description": "The /work endpoint is returning HTTP 500 responses."},
+      "startsAt": "2026-10-20T09:41:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus.local/graph?g0.expr=demo_app_errors_total",
+      "fingerprint": "abc123demo"
+    }
+  ]
+}

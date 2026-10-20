@@ -3,8 +3,9 @@ package config
 import "os"
 
 type Config struct {
-	DatabasePath string
-	Port         string
+	DatabasePath   string
+	Port           string
+	WatchNamespace string
 }
 
 func envOr(key, defaultValue string) string {
@@ -16,8 +17,9 @@ func envOr(key, defaultValue string) string {
 
 func Load() *Config {
 	cfg := &Config{
-		DatabasePath: envOr("DATABASE_PATH", "./data/incidentlens.db"),
-		Port:         envOr("PORT", "8080"),
+		DatabasePath:   envOr("DATABASE_PATH", "./data/incidentlens.db"),
+		Port:           envOr("PORT", "8080"),
+		WatchNamespace: envOr("WATCH_NAMESPACE", "incident-lens"),
 	}
 
 	return cfg
