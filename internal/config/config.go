@@ -5,6 +5,7 @@ import "os"
 type Config struct {
 	DatabasePath string
 	Port         string
+	Namespace    string
 }
 
 func envOr(key, defaultValue string) string {
@@ -18,6 +19,7 @@ func Load() *Config {
 	cfg := &Config{
 		DatabasePath: envOr("DATABASE_PATH", "./data/incidentlens.db"),
 		Port:         envOr("PORT", "8080"),
+		Namespace:    envOr("NAMESPACE", "incident-lens"),
 	}
 
 	return cfg
