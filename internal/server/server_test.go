@@ -13,15 +13,26 @@ import (
 )
 
 type fakeEventStore struct {
-	pingErr    error
-	resolveErr error
-	openErr    error
-	createErr  error
-	getErr     error
-	listErr    error
-	incident   events.Incident
-	event      events.Event
-	events     []events.Event
+	pingErr         error
+	resolveErr      error
+	openErr         error
+	createErr       error
+	getErr          error
+	listErr         error
+	incidentListErr error
+	incident        events.Incident
+	event           events.Event
+	events          []events.Event
+	incidents       []events.Incident
+	listQuery       struct {
+		namespace string
+		service   string
+		status    string
+		from      time.Time
+		to        time.Time
+		limit     int
+		offset    int
+	}
 }
 
 func (f *fakeEventStore) Ping(context.Context) error { return f.pingErr }
@@ -33,6 +44,17 @@ func (f *fakeEventStore) Create(_ context.Context, event *events.Event) error {
 
 func (f *fakeEventStore) ListByIncident(context.Context, string) ([]events.Event, error) {
 	return f.events, f.listErr
+}
+
+func (f *fakeEventStore) ListIncidents(_ context.Context, namespace, service, status string, from, to time.Time, limit, offset int) ([]events.Incident, error) {
+	f.listQuery.namespace = namespace
+	f.listQuery.service = service
+	f.listQuery.status = status
+	f.listQuery.from = from
+	f.listQuery.to = to
+	f.listQuery.limit = limit
+	f.listQuery.offset = offset
+	return f.incidents, f.incidentListErr
 }
 
 func (f *fakeEventStore) OpenIncident(_ context.Context, incident *events.Incident, alert *events.Event, _ time.Duration) error {
@@ -86,9 +108,9 @@ func TestHealthAndReadinessEndpoints(t *testing.T) {
 		pingErr    error
 		wantStatus int
 	}{
-		{name: "liveness is healthy", path: "/healthz", wantStatus: http.StatusOK},
-		{name: "readiness when database responds", path: "/readyz", wantStatus: http.StatusOK},
-		{name: "readiness when database fails", path: "/readyz", pingErr: errors.New("database unavailable"), wantStatus: http.StatusServiceUnavailable},
+		{name: "liveness is healthy", path: "/health", wantStatus: http.StatusOK},
+		{name: "readiness when database responds", path: "/ready", wantStatus: http.StatusOK},
+		{name: "readiness when database fails", path: "/ready", pingErr: errors.New("database unavailable"), wantStatus: http.StatusServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,7 +128,7 @@ func TestReadinessDependencyFailure(t *testing.T) {
 	readinessErr := errors.New("Kubernetes watcher caches are not synchronized")
 	handler := NewServer(&fakeEventStore{}, func(context.Context) error { return readinessErr }).Handler()
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ready", nil))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusServiceUnavailable)
 	}
@@ -123,6 +145,28 @@ func TestCreateEventOpensIncident(t *testing.T) {
 	}
 	if store.event.Type != "alert_fired" {
 		t.Errorf("stored alert type = %q, want alert_fired", store.event.Type)
+	}
+}
+
+func TestAlertmanagerWebhookOpensIncident(t *testing.T) {
+	store := &fakeEventStore{}
+	body := `{"version":"4","groupKey":"demo","status":"firing","receiver":"incident-lens","alerts":[{"status":"firing","labels":{"alertname":"DemoAppErrors","namespace":"incident-lens","service":"demo-app"},"annotations":{"summary":"Demo errors"},"startsAt":"2026-10-20T09:58:00Z","fingerprint":"abc123"}]}`
+	response := sendJSONRequest(t, NewServer(store).Handler(), http.MethodPost, "/api/v1/ingest/alertmanager", body)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusAccepted, response.Body.String())
+	}
+	if store.incident.ID == "" || store.incident.Status != events.IncidentStatusOpen {
+		t.Errorf("opened incident = %#v", store.incident)
+	}
+	if store.event.Type != "alert_fired" || store.event.Source != "alertmanager" || store.event.Service != "demo-app" {
+		t.Errorf("stored event = %#v", store.event)
+	}
+}
+
+func TestAlertmanagerWebhookRejectsInvalidPayload(t *testing.T) {
+	response := sendJSONRequest(t, NewServer(&fakeEventStore{}).Handler(), http.MethodPost, "/api/v1/ingest/alertmanager", `{"version":"3","alerts":[]}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusBadRequest, response.Body.String())
 	}
 }
 
@@ -200,6 +244,57 @@ func TestGetIncidentAndEvents(t *testing.T) {
 	handler.ServeHTTP(eventsResponse, httptest.NewRequest(http.MethodGet, "/api/v1/incidents/incident-1/events", nil))
 	if eventsResponse.Code != http.StatusOK || !strings.Contains(eventsResponse.Body.String(), `"event-1"`) {
 		t.Errorf("GET timeline response = %d %s", eventsResponse.Code, eventsResponse.Body.String())
+	}
+}
+
+func TestListIncidentsDefaultsAndFilters(t *testing.T) {
+	store := &fakeEventStore{incidents: []events.Incident{{ID: "incident-1", Status: events.IncidentStatusOpen}}}
+	handler := NewServer(store).Handler()
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "incident-1") {
+		t.Fatalf("default list response = %d %s", response.Code, response.Body.String())
+	}
+	if store.listQuery.limit != 50 || store.listQuery.offset != 0 {
+		t.Fatalf("default pagination = limit %d offset %d, want 50 and 0", store.listQuery.limit, store.listQuery.offset)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/incidents?namespace=incident-lens&service=demo-app&status=open&from=2026-10-20T09:00:00Z&to=2026-10-20T10:00:00Z&limit=25&offset=50", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("filtered list status = %d, body: %s", response.Code, response.Body.String())
+	}
+	query := store.listQuery
+	if query.namespace != "incident-lens" || query.service != "demo-app" || query.status != "open" || query.limit != 25 || query.offset != 50 {
+		t.Fatalf("store query = %#v", query)
+	}
+	if query.from.Format(time.RFC3339) != "2026-10-20T09:00:00Z" || query.to.Format(time.RFC3339) != "2026-10-20T10:00:00Z" {
+		t.Fatalf("time filters = %s through %s", query.from, query.to)
+	}
+}
+
+func TestListIncidentsRejectsInvalidQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{name: "bad from timestamp", query: "?from=yesterday"},
+		{name: "bad to timestamp", query: "?to=tomorrow"},
+		{name: "reversed range", query: "?from=2026-10-20T10:00:00Z&to=2026-10-20T09:00:00Z"},
+		{name: "unsupported status", query: "?status=active"},
+		{name: "too-large limit", query: "?limit=201"},
+		{name: "negative offset", query: "?offset=-1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			NewServer(&fakeEventStore{}).Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/incidents"+tt.query, nil))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusBadRequest, response.Body.String())
+			}
+		})
 	}
 }
 

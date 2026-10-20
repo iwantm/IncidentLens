@@ -67,6 +67,12 @@ func (s *EventStore) OpenIncident(
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(incident).Error; err != nil {
 			return err
 		}
+		var existing events.Event
+		if err := tx.First(&existing, "id = ? AND incident_id = ?", alert.ID, incident.ID).Error; err == nil {
+			return nil // Alertmanager retry of an already-recorded firing notification.
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
 
 		var stored events.Incident
 		if err := tx.First(&stored, "id = ?", incident.ID).Error; err != nil {
@@ -106,6 +112,13 @@ func (s *EventStore) ResolveIncident(
 	ctx, span := telemetry.StartSpan(ctx, "storage.incident.resolve", attribute.String("incident.id", incidentID), attribute.String("event.id", resolution.ID))
 	defer func() { telemetry.EndSpan(span, err) }()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing events.Event
+		if err := tx.First(&existing, "id = ? AND incident_id = ?", resolution.ID, incidentID).Error; err == nil {
+			return nil // Alertmanager retry of an already-recorded resolution notification.
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
 		resolvedAt := resolution.Timestamp
 		result := tx.Model(&events.Incident{}).
 			Where("id = ? AND status = ?", incidentID, events.IncidentStatusOpen).
@@ -123,6 +136,11 @@ func (s *EventStore) ResolveIncident(
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					return fmt.Errorf("%w: %s", events.ErrIncidentNotFound, incidentID)
 				}
+				return err
+			}
+			if err := tx.First(&existing, "id = ? AND incident_id = ?", resolution.ID, incidentID).Error; err == nil {
+				return nil
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
 			return fmt.Errorf("%w: %s", events.ErrIncidentAlreadyClosed, incidentID)
@@ -157,6 +175,43 @@ func (s *EventStore) ListByIncident(
 		Where("incident_id = ?", incidentID).
 		Order("timestamp ASC").
 		Find(&listed).Error
+
+	return listed, err
+}
+
+func (s *EventStore) ListIncidents(
+	ctx context.Context,
+	namespace string,
+	service string,
+	status string,
+	from time.Time,
+	to time.Time,
+	limit int,
+	offset int,
+) (listed []events.Incident, err error) {
+	ctx, span := telemetry.StartSpan(ctx, "storage.incidents.list", attribute.String("incident.namespace", namespace), attribute.String("incident.service", service), attribute.String("incident.status", status))
+	defer func() { telemetry.EndSpan(span, err) }()
+	listed = make([]events.Incident, 0)
+
+	query := s.db.WithContext(ctx)
+	if !from.IsZero() {
+		query = query.Where("started_at >= ?", from)
+	}
+	if !to.IsZero() {
+		query = query.Where("started_at <= ?", to)
+	}
+
+	if namespace != "" {
+		query = query.Where("namespace = ?", namespace)
+	}
+	if service != "" {
+		query = query.Where("service = ?", service)
+	}
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	err = query.Order("started_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&listed).Error
 
 	return listed, err
 }

@@ -62,13 +62,13 @@ func run() error {
 	)
 	defer stop()
 
-	watcher := kube.NewWatcher(kubeClient, "incident-lens", eventStore)
+	watcher := kube.NewWatcher(kubeClient, cfg.WatchNamespace, eventStore)
 
 	watcherErr := make(chan error, 1)
 	go func() {
 		watcherErr <- watcher.Run(ctx)
 	}()
-	slog.Info("Kubernetes watcher initializing", "namespace", "incident-lens")
+	slog.Info("Kubernetes watcher initializing", "namespace", cfg.WatchNamespace)
 
 	server := server.NewServer(eventStore, func(context.Context) error {
 		if !watcher.Ready() {

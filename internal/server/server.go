@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/iwantm/IncidentLens/internal/alertmanager"
 	"github.com/iwantm/IncidentLens/internal/events"
 	"github.com/iwantm/IncidentLens/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
@@ -18,6 +21,7 @@ type EventStore interface {
 	Ping(ctx context.Context) error
 	Create(ctx context.Context, event *events.Event) error
 	ListByIncident(ctx context.Context, incidentID string) ([]events.Event, error)
+	ListIncidents(ctx context.Context, namespace string, service string, status string, from time.Time, to time.Time, limit int, offset int) ([]events.Incident, error)
 	OpenIncident(
 		ctx context.Context,
 		incident *events.Incident,
@@ -48,6 +52,8 @@ func NewServer(store EventStore, readiness ...func(context.Context) error) *Serv
 	serv.mux.HandleFunc("GET /health", serv.health)
 	serv.mux.HandleFunc("GET /ready", serv.ready)
 	serv.mux.HandleFunc("POST /api/v1/events", serv.createEvent)
+	serv.mux.HandleFunc("POST /api/v1/ingest/alertmanager", serv.ingestAlertmanager)
+	serv.mux.HandleFunc("GET /api/v1/incidents", serv.listIncidents)
 	serv.mux.HandleFunc("GET /api/v1/incidents/{incidentID}", serv.getIncident)
 	serv.mux.HandleFunc("GET /api/v1/incidents/{incidentID}/events", serv.listEvents)
 
@@ -102,7 +108,45 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 	if event.ObservedAt.IsZero() {
 		event.ObservedAt = time.Now().UTC()
 	}
+	if status, err := s.processEvent(r.Context(), &event); err != nil {
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, event)
+}
 
+func (s *Server) ingestAlertmanager(w http.ResponseWriter, r *http.Request) {
+	var notification alertmanager.Webhook
+	r.Body = http.MaxBytesReader(w, r.Body, 1048576)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&notification); err != nil {
+		slog.WarnContext(r.Context(), "rejected invalid Alertmanager payload", "error", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Alertmanager payload"})
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request must contain one JSON value"})
+		return
+	}
+
+	converted, err := notification.Events(time.Now().UTC())
+	if err != nil {
+		slog.WarnContext(r.Context(), "rejected invalid Alertmanager notification", "error", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	for _, event := range converted {
+		if status, err := s.processEvent(r.Context(), &event); err != nil {
+			slog.ErrorContext(r.Context(), "failed to ingest Alertmanager alert", "incident_id", event.IncidentID, "event_id", event.ID, "error", err)
+			writeJSON(w, status, map[string]string{"error": "could not ingest Alertmanager alert"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "alerts_received": len(converted)})
+}
+
+func (s *Server) processEvent(ctx context.Context, event *events.Event) (int, error) {
 	switch event.Type {
 	case "alert_fired":
 		incident := &events.Incident{
@@ -113,54 +157,38 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 			Status:    events.IncidentStatusOpen,
 			StartedAt: event.Timestamp,
 		}
-		if err := s.store.OpenIncident(r.Context(), incident, &event, 5*time.Minute); err != nil {
+		if err := s.store.OpenIncident(ctx, incident, event, 5*time.Minute); err != nil {
 			if errors.Is(err, events.ErrIncidentAlreadyClosed) {
-				telemetry.RecordIncidentAction(r.Context(), "open", "conflict")
-				slog.WarnContext(r.Context(), "incident open rejected because incident is closed", "incident_id", event.IncidentID, "event_id", event.ID)
-				writeJSON(w, http.StatusConflict, map[string]string{"error": "incident is already closed"})
-				return
+				telemetry.RecordIncidentAction(ctx, "open", "conflict")
+				return http.StatusConflict, errors.New("incident is already closed")
 			}
-			telemetry.RecordIncidentAction(r.Context(), "open", "error")
-			slog.ErrorContext(r.Context(), "failed to open incident", "incident_id", event.IncidentID, "event_id", event.ID, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "could not open incident",
-			})
-			return
+			telemetry.RecordIncidentAction(ctx, "open", "error")
+			slog.ErrorContext(ctx, "failed to open incident", "incident_id", event.IncidentID, "event_id", event.ID, "error", err)
+			return http.StatusInternalServerError, errors.New("could not open incident")
 		}
-		telemetry.RecordIncidentAction(r.Context(), "open", "success")
+		telemetry.RecordIncidentAction(ctx, "open", "success")
 	case "alert_resolved":
-		if err := s.store.ResolveIncident(r.Context(), event.IncidentID, &event); err != nil {
+		if err := s.store.ResolveIncident(ctx, event.IncidentID, event); err != nil {
 			if errors.Is(err, events.ErrIncidentNotFound) {
-				telemetry.RecordIncidentAction(r.Context(), "resolve", "not_found")
-				slog.WarnContext(r.Context(), "incident resolution references unknown incident", "incident_id", event.IncidentID, "event_id", event.ID)
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
-				return
+				telemetry.RecordIncidentAction(ctx, "resolve", "not_found")
+				return http.StatusNotFound, errors.New("incident not found")
 			}
 			if errors.Is(err, events.ErrIncidentAlreadyClosed) {
-				telemetry.RecordIncidentAction(r.Context(), "resolve", "conflict")
-				slog.WarnContext(r.Context(), "incident resolution rejected because incident is already closed", "incident_id", event.IncidentID, "event_id", event.ID)
-				writeJSON(w, http.StatusConflict, map[string]string{"error": "incident is already closed"})
-				return
+				telemetry.RecordIncidentAction(ctx, "resolve", "conflict")
+				return http.StatusConflict, errors.New("incident is already closed")
 			}
-			telemetry.RecordIncidentAction(r.Context(), "resolve", "error")
-			slog.ErrorContext(r.Context(), "failed to resolve incident", "incident_id", event.IncidentID, "event_id", event.ID, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "could not resolve incident",
-			})
-			return
+			telemetry.RecordIncidentAction(ctx, "resolve", "error")
+			slog.ErrorContext(ctx, "failed to resolve incident", "incident_id", event.IncidentID, "event_id", event.ID, "error", err)
+			return http.StatusInternalServerError, errors.New("could not resolve incident")
 		}
-		telemetry.RecordIncidentAction(r.Context(), "resolve", "success")
+		telemetry.RecordIncidentAction(ctx, "resolve", "success")
 	default:
-		if err := s.store.Create(r.Context(), &event); err != nil {
-			slog.ErrorContext(r.Context(), "failed to save event", "incident_id", event.IncidentID, "event_id", event.ID, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "could not save event",
-			})
-			return
+		if err := s.store.Create(ctx, event); err != nil {
+			slog.ErrorContext(ctx, "failed to save event", "incident_id", event.IncidentID, "event_id", event.ID, "error", err)
+			return http.StatusInternalServerError, errors.New("could not save event")
 		}
 	}
-
-	writeJSON(w, http.StatusCreated, event)
+	return http.StatusCreated, nil
 }
 
 func (s *Server) getIncident(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +212,65 @@ func (s *Server) getIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, incident)
+}
+
+func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	namespace := strings.TrimSpace(query.Get("namespace"))
+	service := strings.TrimSpace(query.Get("service"))
+	status := strings.TrimSpace(query.Get("status"))
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+
+	var fromTime, toTime time.Time
+	var err error
+	if from != "" {
+		fromTime, err = time.Parse(time.RFC3339Nano, from)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid 'from' timestamp; expected RFC3339"})
+			return
+		}
+	}
+	if to != "" {
+		toTime, err = time.Parse(time.RFC3339Nano, to)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid 'to' timestamp; expected RFC3339"})
+			return
+		}
+	}
+	if !fromTime.IsZero() && !toTime.IsZero() && fromTime.After(toTime) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "'from' must not be after 'to'"})
+		return
+	}
+	if status != "" && status != events.IncidentStatusOpen && status != events.IncidentStatusClosed {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be 'open' or 'closed'"})
+		return
+	}
+	limit := 50
+	if rawLimit := query.Get("limit"); rawLimit != "" {
+		limit, err = strconv.Atoi(rawLimit)
+		if err != nil || limit < 1 || limit > 200 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be an integer between 1 and 200"})
+			return
+		}
+	}
+	offset := 0
+	if rawOffset := query.Get("offset"); rawOffset != "" {
+		offset, err = strconv.Atoi(rawOffset)
+		if err != nil || offset < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "offset must be a non-negative integer"})
+			return
+		}
+	}
+
+	incidents, err := s.store.ListIncidents(r.Context(), namespace, service, status, fromTime, toTime, limit, offset)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "failed to list incidents", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list incidents"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, incidents)
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {

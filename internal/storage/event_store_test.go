@@ -94,6 +94,30 @@ func TestResolveIncidentClosesAndRejectsRepeatedResolution(t *testing.T) {
 	}
 }
 
+func TestResolveIncidentRetryWithSameEventIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store := newTestEventStore(t)
+	startedAt := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	incident := events.Incident{ID: "incident-retry", Namespace: "incident-lens", Summary: "retry test", Status: events.IncidentStatusOpen, StartedAt: startedAt}
+	if err := store.db.Create(&incident).Error; err != nil {
+		t.Fatal(err)
+	}
+	resolution := testResolution(incident.ID, "same-resolution-id", startedAt.Add(time.Minute))
+	if err := store.ResolveIncident(ctx, incident.ID, &resolution); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResolveIncident(ctx, incident.ID, &resolution); err != nil {
+		t.Fatalf("retry ResolveIncident() error = %v, want nil", err)
+	}
+	timeline, err := store.ListByIncident(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline) != 1 {
+		t.Fatalf("timeline has %d events, want 1", len(timeline))
+	}
+}
+
 func TestOpenIncidentBackfillsMatchingObservations(t *testing.T) {
 	ctx := context.Background()
 	store := newTestEventStore(t)
@@ -141,6 +165,32 @@ func TestOpenIncidentBackfillsMatchingObservations(t *testing.T) {
 		if !gotIDs[converted.ID] {
 			t.Errorf("timeline is missing backfilled observation %q", sourceID)
 		}
+	}
+}
+
+func TestOpenIncidentRetryAfterResolutionIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store := newTestEventStore(t)
+	startedAt := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	incident := &events.Incident{ID: "incident-firing-retry", Namespace: "incident-lens", Summary: "retry test", Status: events.IncidentStatusOpen, StartedAt: startedAt}
+	alert := testResolution(incident.ID, "same-firing-event", startedAt)
+	alert.Type = "alert_fired"
+	if err := store.OpenIncident(ctx, incident, &alert, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	resolution := testResolution(incident.ID, "resolution-event", startedAt.Add(time.Minute))
+	if err := store.ResolveIncident(ctx, incident.ID, &resolution); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.OpenIncident(ctx, incident, &alert, 5*time.Minute); err != nil {
+		t.Fatalf("retry OpenIncident() error = %v, want nil", err)
+	}
+	timeline, err := store.ListByIncident(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline) != 2 {
+		t.Fatalf("timeline has %d events, want firing plus resolution", len(timeline))
 	}
 }
 
@@ -230,6 +280,44 @@ func TestListObservationsFiltersByTimeNamespaceAndService(t *testing.T) {
 	}
 	if len(filtered) != 1 || filtered[0].SourceID != "match" {
 		t.Errorf("filtered observations = %#v, want only the matching observation", filtered)
+	}
+}
+
+func TestListIncidentsFiltersOrdersAndPaginates(t *testing.T) {
+	ctx := context.Background()
+	store := newTestEventStore(t)
+	base := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	incidents := []events.Incident{
+		{ID: "incident-a", Namespace: "incident-lens", Service: "demo-app", Summary: "older", Status: events.IncidentStatusOpen, StartedAt: base},
+		{ID: "incident-b", Namespace: "incident-lens", Service: "demo-app", Summary: "newer", Status: events.IncidentStatusClosed, StartedAt: base.Add(time.Minute)},
+		{ID: "incident-c", Namespace: "other", Service: "other-app", Summary: "newest", Status: events.IncidentStatusOpen, StartedAt: base.Add(2 * time.Minute)},
+	}
+	if err := store.db.Create(&incidents).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := store.ListIncidents(ctx, "", "", "", time.Time{}, time.Time{}, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 2 || page[0].ID != "incident-c" || page[1].ID != "incident-b" {
+		t.Fatalf("first page = %#v, want newest two incidents first", page)
+	}
+
+	filtered, err := store.ListIncidents(ctx, "incident-lens", "demo-app", events.IncidentStatusOpen, base, base.Add(time.Minute), 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].ID != "incident-a" {
+		t.Fatalf("filtered incidents = %#v, want incident-a", filtered)
+	}
+
+	secondPage, err := store.ListIncidents(ctx, "", "", "", time.Time{}, time.Time{}, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondPage) != 2 || secondPage[0].ID != "incident-b" || secondPage[1].ID != "incident-a" {
+		t.Fatalf("second page = %#v, want next two incidents", secondPage)
 	}
 }
 

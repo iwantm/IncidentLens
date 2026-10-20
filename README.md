@@ -12,16 +12,33 @@ Submit an event to `POST /api/v1/events` to open or resolve an incident. An `ale
 
 Submit an event with `type: "alert_resolved"` and the same `incident_id` to close it. Other event types are saved to the specified incident timeline.
 
+### Alertmanager webhook
+
+Configure an Alertmanager webhook receiver to send notifications to `POST /api/v1/ingest/alertmanager`. The endpoint accepts Alertmanager webhook version 4, including grouped notifications. Each alert is mapped independently; its fingerprint and `startsAt` identify one incident lifecycle, so Alertmanager retries do not create duplicate timeline events and a later firing creates a new incident. The alert's labels and annotations are retained in event evidence. Include a `namespace` label and preferably a `service` label in your alert rules so Kubernetes observations can be matched to the incident.
+
+```yaml
+receivers:
+  - name: incident-lens
+    webhook_configs:
+      - url: http://recorder.incident-lens.svc/api/v1/ingest/alertmanager
+        send_resolved: true
+```
+
+Alertmanager should be able to reach the recorder service over the cluster network. The endpoint returns a non-2xx response when validation or storage fails, allowing Alertmanager to retry delivery.
+
 Retrieve lifecycle state and the ordered timeline with:
 
 ```text
+GET /api/v1/incidents?namespace=incident-lens&status=open&limit=50&offset=0
 GET /api/v1/incidents/{incidentID}
 GET /api/v1/incidents/{incidentID}/events
 ```
 
+The incident list accepts optional `namespace`, `service`, `status` (`open` or `closed`), `from`, and `to` filters. `from` and `to` are RFC3339 timestamps and filter by incident start time. Results are ordered newest first with a stable ID tie-breaker. Pagination uses `limit` (default 50, maximum 200) and `offset` (default 0).
+
 ## Health and logs
 
-The recorder exposes `GET /healthz` for process liveness and `GET /readyz` for readiness. Readiness checks that both the configured database responds and the Kubernetes watcher has synchronized its caches; Kubernetes removes the recorder from service endpoints when either check fails. The recorder writes structured request, startup, watcher, and storage failure logs to standard output, so they are available through the container logs. Kubernetes client-go logs are routed through the same logger.
+The recorder exposes `GET /health` for process liveness and `GET /ready` for readiness. Readiness checks that both the configured database responds and the Kubernetes watcher has synchronized its caches; Kubernetes removes the recorder from service endpoints when either check fails. Set `WATCH_NAMESPACE` to choose the namespace monitored by the recorder; it defaults to `incident-lens`. The recorder writes structured request, startup, watcher, and storage failure logs to standard output, so they are available through the container logs. Kubernetes client-go logs are routed through the same logger.
 
 The recorder is instrumented with OpenTelemetry for HTTP server traces and metrics, storage spans, and Kubernetes watcher spans. It also emits counters named `incidentlens.incident.actions` and `incidentlens.watcher.observations`, with low-cardinality action/outcome attributes. Structured `slog` records stay on standard output and can also be exported as OpenTelemetry logs. Telemetry export is opt-in; configure an OTLP/HTTP collector endpoint to enable all three signals:
 
