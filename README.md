@@ -50,3 +50,41 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 Use `OTEL_TRACES_EXPORTER=none`, `OTEL_METRICS_EXPORTER=none`, or `OTEL_LOGS_EXPORTER=none` to disable an individual signal. You can also set a signal-specific endpoint such as `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. The service resource name defaults to `incident-lens-recorder`; standard resource environment variables such as `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` are read at startup. Without an endpoint or `OTEL_*_EXPORTER=otlp`, the recorder continues to run normally and emits JSON logs to stdout.
 
 Events and observations are stored separately: observations preserve what the watcher saw, while incident events provide the incident-specific timeline. A single observation may be associated with more than one matching open incident.
+
+## Web console
+
+The React and TypeScript console lives in `web/` and is deployed independently from the recorder. It provides a filterable, paginated incident list and an incident detail view with its chronological event timeline and captured evidence.
+
+### Run locally
+
+Start the recorder on port 8080, then in another terminal:
+
+```sh
+cd web
+bun install
+bun run dev
+```
+
+Open the Vite URL (normally `http://localhost:5173`). Vite forwards `/api` requests to the local recorder at `http://localhost:8080`.
+
+### Build and deploy in Kubernetes
+
+Build the frontend image from the repository root so the Dockerfile can access the `web/` source and shared Nginx config:
+
+```sh
+docker build -f build/docker/frontend.Dockerfile -t incident-lens/frontend:dev .
+```
+
+Load or push that image using the workflow for your cluster, then apply the frontend resources:
+
+```sh
+kubectl apply -f deployments/k8s/frontend.yaml
+```
+
+The frontend runs in the separate `incident-lens-ui` namespace. Its Nginx server serves the single-page app and proxies `/api/` requests to `recorder.incident-lens.svc.cluster.local`, so the browser does not need direct access to the recorder service. The frontend Service is internal (`ClusterIP`); for local access, forward a local port to it:
+
+```sh
+kubectl port-forward -n incident-lens-ui service/frontend 8081:80
+```
+
+Then open `http://localhost:8081`. For access beyond a local cluster, expose the frontend Service through an Ingress or Gateway configured for your cluster; the recorder can remain private.

@@ -45,6 +45,7 @@ export interface ListIncidentsOptions {
 
 export function listIncidents(
   options: ListIncidentsOptions = {},
+  signal?: AbortSignal,
 ): Promise<Incident[]> {
   const query = new URLSearchParams();
 
@@ -55,15 +56,22 @@ export function listIncidents(
   }
 
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return getJSON<Incident[]>(`/api/v1/incidents${suffix}`);
+  return getJSON<Incident[]>(`/api/v1/incidents${suffix}`, signal);
 }
 
-export function getIncident(id: string): Promise<Incident> {
-  return getJSON<Incident>(`/api/v1/incidents/${encodeURIComponent(id)}`);
+export function getIncident(
+  id: string,
+  signal?: AbortSignal,
+): Promise<Incident> {
+  return getJSON<Incident>(`/api/v1/incidents/${encodeURIComponent(id)}`, signal);
 }
 
-export function listIncidentEvents(id: string): Promise<IncidentEvent[]> {
+export function listIncidentEvents(
+  id: string,
+  signal?: AbortSignal,
+): Promise<IncidentEvent[]> {
   return getJSON<IncidentEvent[]>(
     `/api/v1/incidents/${encodeURIComponent(id)}/events`,
+    signal,
   );
 }
