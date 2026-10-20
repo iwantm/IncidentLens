@@ -22,7 +22,7 @@ spec:
               containerPort: 8080
           env:
             - name: FAIL_MODE
-              value: "false"
+              value: "true"
           readinessProbe:
             httpGet:
               path: /health

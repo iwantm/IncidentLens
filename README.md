@@ -55,6 +55,32 @@ Events and observations are stored separately: observations preserve what the wa
 
 The React and TypeScript console lives in `web/` and is deployed independently from the recorder. It provides a filterable, paginated incident list and an incident detail view with its chronological event timeline and captured evidence.
 
+### Frontend OpenTelemetry
+
+The React client can export traces, metrics, and logs using OTLP over HTTP. Tracing covers API calls and page navigation; API calls also contribute request-count and duration metrics, while failed calls emit structured error logs. The telemetry resource identifies the frontend as `incident-lens-web`. Export is disabled unless an OTLP endpoint is configured, and telemetry uses route templates rather than incident IDs.
+
+For local development, run Jaeger with an OTLP/HTTP receiver on port 4318, copy `web/.env.example` to `web/.env.local`, then start Vite. Jaeger stores traces in memory, and the Vite `/otlp` proxy forwards to `localhost:4318`, avoiding browser CORS. Jaeger is for tracing here; leave frontend metrics and logs pointed at an OpenTelemetry Collector if you want those signals too.
+
+If Jaeger is running in Kubernetes, forward its OTLP and UI ports in separate terminals:
+
+```sh
+kubectl port-forward -n incident-lens-observability service/jaeger 4318:4318
+kubectl port-forward -n incident-lens-observability service/jaeger 16686:16686
+```
+
+Then start Vite with the copied `.env.local` and open `http://localhost:16686` for Jaeger.
+
+For the container image, set a browser-reachable OTLP endpoint at build time. The local Jaeger setup uses `/otlp`, which Nginx forwards to Jaeger's OTLP/HTTP receiver:
+
+```sh
+docker build \
+  --build-arg VITE_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=/otlp \
+  -f build/docker/frontend.Dockerfile \
+  -t incident-lens/frontend:dev .
+```
+
+If the Collector is on a different origin from the UI, configure its OTLP/HTTP receiver CORS `allowed_origins` for the exact UI origin and allow the `Content-Type` header. Do not put secrets in `VITE_*` variables; they are embedded in public frontend assets. Browser instrumentation and the OpenTelemetry JS Logs SDK are still evolving, so use frontend telemetry alongside the recorder's server-side signals.
+
 ### Run locally
 
 Start the recorder on port 8080, then in another terminal:
@@ -88,3 +114,55 @@ kubectl port-forward -n incident-lens-ui service/frontend 8081:80
 ```
 
 Then open `http://localhost:8081`. For access beyond a local cluster, expose the frontend Service through an Ingress or Gateway configured for your cluster; the recorder can remain private.
+
+### Test traces with Jaeger in local Kubernetes
+
+The local Jaeger manifest runs the Jaeger 2 all-in-one image with in-memory trace storage. Traces disappear when its pod is restarted. Apply Jaeger first so its Service exists before the frontend Nginx configuration starts:
+
+```sh
+kubectl apply -f deployments/k8s/jaeger.yaml
+kubectl rollout status deployment/jaeger -n incident-lens-observability
+```
+
+Restrict Jaeger's OTLP/HTTP receiver to the frontend and recorder pods:
+
+```sh
+kubectl apply -f deployments/k8s/telemetry-networkpolicy.yaml
+```
+
+This policy selects the current Jaeger pod (`app: jaeger`) and allows only TCP/4318 from `app: frontend` in `incident-lens-ui` and `app: recorder` in `incident-lens`. It does not allow OTLP/gRPC on 4317. The frontend image's `/otlp` proxy and the recorder exporter both use OTLP/HTTP. NetworkPolicies are additive, so check for other policies that grant broader ingress, and confirm your cluster CNI enforces NetworkPolicies. If Jaeger is replaced by an OpenTelemetry Collector gateway, update the policy's pod selector to the Collector's labels.
+
+The recorder manifest configures its trace exporter to send to Jaeger. Apply it and wait for the rollout:
+
+```sh
+kubectl apply -f deployments/k8s/recorder-deployment.yaml
+kubectl rollout status deployment/recorder -n incident-lens
+```
+
+Build the UI with browser tracing enabled, then make the image available in your local cluster. Use the matching image-load command for your cluster:
+
+```sh
+docker build \
+  --build-arg VITE_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=/otlp \
+  -f build/docker/frontend.Dockerfile \
+  -t incident-lens/frontend:dev .
+```
+
+For Kind, run `kind load docker-image incident-lens/frontend:dev`. For Minikube, run `minikube image load incident-lens/frontend:dev`. For k3d, run `k3d image import incident-lens/frontend:dev` (add `-c <cluster-name>` if needed). Then apply or restart the frontend:
+
+```sh
+kubectl apply -f deployments/k8s/frontend.yaml
+kubectl rollout restart deployment/frontend -n incident-lens-ui
+kubectl rollout status deployment/frontend -n incident-lens-ui
+```
+
+The frontend sends browser traces to its same-origin `/otlp/v1/traces` path. Nginx forwards them to Jaeger across namespaces, so the browser does not need Jaeger CORS access. The recorder sends its server-side traces directly to Jaeger using its in-cluster Service DNS name.
+
+Open Jaeger and the UI in separate terminals:
+
+```sh
+kubectl port-forward -n incident-lens-observability service/jaeger 16686:16686
+kubectl port-forward -n incident-lens-ui service/frontend 8081:80
+```
+
+Open `http://localhost:8081`, browse the incident list and details, then view `http://localhost:16686`. In Jaeger, choose `incident-lens-web` or `github.com/iwantm/IncidentLens` in the Service selector and click **Find Traces**. For a connected frontend-to-recorder trace, open a detail page that makes an API request; the browser trace context is propagated to the recorder. Jaeger does not receive this app's metrics or logs: use an OpenTelemetry Collector to receive those signals.

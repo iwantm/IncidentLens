@@ -1,4 +1,6 @@
-import { Link, Navigate, Route, Routes, useParams } from "react-router";
+import { useEffect } from "react";
+import { Link, Navigate, Route, Routes, useLocation, useParams } from "react-router";
+import { recordNavigation } from "../telemetry";
 import { IncidentListPage } from "../features/incidents/IncidentList";
 import { IncidentDetailPage } from "../features/incidents/incidentDetail";
 
@@ -22,6 +24,11 @@ function NotFoundPage() {
 }
 
 function App() {
+  const location = useLocation();
+  useEffect(() => {
+    recordNavigation(normalizePageRoute(location.pathname));
+  }, [location.pathname]);
+
   return (
     <div className="flex min-h-screen flex-col">
       <header className="border-b border-slate-200 bg-white">
@@ -52,6 +59,13 @@ function App() {
       </footer>
     </div>
   );
+}
+
+function normalizePageRoute(pathname: string) {
+  if (pathname === "/") return "/";
+  if (pathname === "/incidents") return "/incidents";
+  if (pathname.startsWith("/incidents/")) return "/incidents/{incidentID}";
+  return "/404";
 }
 
 export default App;
