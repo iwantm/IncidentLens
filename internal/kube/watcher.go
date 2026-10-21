@@ -146,10 +146,14 @@ func (w *Watcher) recordEvent(ctx context.Context, event *corev1.Event) {
 		sourceVersion = observedAt.Format(time.RFC3339Nano)
 	}
 
-	summary := strings.TrimSpace(strings.Join(
-		[]string{event.Reason, event.Message},
-		": ",
-	))
+	parts := make([]string, 0, 2)
+	if reason := strings.TrimSpace(event.Reason); reason != "" {
+		parts = append(parts, reason)
+	}
+	if message := strings.TrimSpace(event.Message); message != "" {
+		parts = append(parts, message)
+	}
+	summary := strings.Join(parts, ": ")
 	if summary == "" {
 		summary = "Kubernetes Event observed"
 	}

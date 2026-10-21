@@ -41,6 +41,28 @@ func TestResolveIncidentUnknownIncident(t *testing.T) {
 	}
 }
 
+func TestPingAndCreateEvent(t *testing.T) {
+	ctx := context.Background()
+	store := newTestEventStore(t)
+	if err := store.Ping(ctx); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	event := events.Event{
+		ID: "event-create", IncidentID: "incident-create", Timestamp: time.Now().UTC(),
+		Type: "custom", Summary: "created through store", Source: "test",
+	}
+	if err := store.Create(ctx, &event); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	listed, err := store.ListByIncident(ctx, event.IncidentID)
+	if err != nil {
+		t.Fatalf("ListByIncident() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != event.ID {
+		t.Fatalf("stored events = %#v, want event %q", listed, event.ID)
+	}
+}
+
 func TestResolveIncidentClosesAndRejectsRepeatedResolution(t *testing.T) {
 	ctx := context.Background()
 	store := newTestEventStore(t)

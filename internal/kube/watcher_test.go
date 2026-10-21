@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -9,10 +10,33 @@ import (
 	"github.com/iwantm/IncidentLens/internal/events"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+func TestNewClientRequiresInClusterConfiguration(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	client, err := NewClient()
+	if err == nil {
+		t.Fatal("NewClient() error = nil outside a cluster, want configuration error")
+	}
+	if client != nil {
+		t.Fatalf("NewClient() client = %#v on configuration error, want nil", client)
+	}
+}
+
+func TestIsNotFound(t *testing.T) {
+	if !IsNotFound(apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "missing")) {
+		t.Fatal("IsNotFound() = false for Kubernetes NotFound error")
+	}
+	if IsNotFound(errors.New("other error")) {
+		t.Fatal("IsNotFound() = true for a generic error")
+	}
+}
 
 type captureObservationStore struct {
 	mu           sync.Mutex
@@ -61,6 +85,28 @@ func TestRecordEventConvertsKubernetesEvent(t *testing.T) {
 	}
 }
 
+func TestRecordEventHandlesNilAndStorageFailure(t *testing.T) {
+	storeErr := errors.New("database unavailable")
+	store := &captureObservationStore{err: storeErr}
+	watcher := NewWatcher(nil, "incident-lens", store)
+	watcher.recordEvent(context.Background(), nil)
+	if len(store.observations) != 0 {
+		t.Fatalf("nil event stored %d observations, want none", len(store.observations))
+	}
+	watcher.recordEvent(context.Background(), &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "incident-lens"},
+	})
+	if len(store.observations) != 1 {
+		t.Fatalf("stored observations = %d, want 1 despite storage error", len(store.observations))
+	}
+	if store.observations[0].Summary != "Kubernetes Event observed" {
+		t.Errorf("empty event summary = %q, want fallback summary", store.observations[0].Summary)
+	}
+	if store.observations[0].SourceVersion == "" {
+		t.Error("empty resource version should receive an observed-time version")
+	}
+}
+
 func TestEventTimestampFallbackOrder(t *testing.T) {
 	first := time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC)
 	last := first.Add(time.Minute)
@@ -104,6 +150,24 @@ func TestRecordDeploymentChangeConvertsObservation(t *testing.T) {
 	}
 	if got.Evidence["old_generation"] != int64(4) || got.Evidence["generation"] != int64(5) {
 		t.Errorf("deployment evidence conversion incorrect: %#v", got.Evidence)
+	}
+}
+
+func TestRecordDeploymentChangeHandlesNilAndStorageFailure(t *testing.T) {
+	store := &captureObservationStore{err: errors.New("database unavailable")}
+	watcher := NewWatcher(nil, "incident-lens", store)
+	watcher.recordDeploymentChange(context.Background(), nil, nil)
+	if len(store.observations) != 0 {
+		t.Fatalf("nil deployment stored %d observations, want none", len(store.observations))
+	}
+	watcher.recordDeploymentChange(context.Background(), &appsv1.Deployment{}, &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "incident-lens", Name: "demo-app", Generation: 2},
+	})
+	if len(store.observations) != 1 {
+		t.Fatalf("stored observations = %d, want 1 despite storage error", len(store.observations))
+	}
+	if store.observations[0].SourceID != "incident-lens/demo-app" {
+		t.Errorf("deployment source ID = %q, want namespace/name fallback", store.observations[0].SourceID)
 	}
 }
 

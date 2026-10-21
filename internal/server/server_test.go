@@ -298,6 +298,52 @@ func TestListIncidentsRejectsInvalidQuery(t *testing.T) {
 	}
 }
 
+func TestAnalyzeIncidentEndpoint(t *testing.T) {
+	startedAt := time.Now().UTC().Add(-time.Minute)
+	deployment := events.Event{
+		ID: "deployment-1", Type: "deployment_changed", Namespace: "incident-lens",
+		Service: "demo-app", Timestamp: startedAt.Add(-time.Minute),
+	}
+	store := &fakeEventStore{
+		incident: events.Incident{
+			ID: "incident-1", Namespace: "incident-lens", Service: "demo-app",
+			Status: events.IncidentStatusOpen, StartedAt: startedAt,
+		},
+		events: []events.Event{deployment},
+	}
+	response := httptest.NewRecorder()
+	NewServer(store).Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/incidents/incident-1/analysis", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	for _, expected := range []string{"deployment_change_before_alert", "deployment-1"} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Errorf("analysis response %q does not contain %q", response.Body.String(), expected)
+		}
+	}
+}
+
+func TestAnalyzeIncidentEndpointErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		store      *fakeEventStore
+		wantStatus int
+	}{
+		{name: "missing incident", store: &fakeEventStore{getErr: events.ErrIncidentNotFound}, wantStatus: http.StatusNotFound},
+		{name: "incident read error", store: &fakeEventStore{getErr: errors.New("database unavailable")}, wantStatus: http.StatusInternalServerError},
+		{name: "timeline read error", store: &fakeEventStore{incident: events.Incident{ID: "incident-1"}, listErr: errors.New("database unavailable")}, wantStatus: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			NewServer(tt.store).Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/incidents/incident-1/analysis", nil))
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body: %s", response.Code, tt.wantStatus, response.Body.String())
+			}
+		})
+	}
+}
+
 func sendJSONRequest(t *testing.T, handler http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
