@@ -170,6 +170,7 @@ func (w *Watcher) recordEvent(ctx context.Context, event *corev1.Event) {
 			UID:        string(event.InvolvedObject.UID),
 		},
 		Evidence: map[string]any{
+			"event_type":             event.Type,
 			"reason":                 event.Reason,
 			"action":                 event.Action,
 			"count":                  event.Count,

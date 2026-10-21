@@ -64,5 +64,6 @@ function normalizeRoute(path: string) {
   const cleanPath = path.split("?", 1)[0];
   return cleanPath
     .replace(/(\/api\/v1\/incidents)\/[^/]+\/events$/, "$1/{incidentID}/events")
+    .replace(/(\/api\/v1\/incidents)\/[^/]+\/analysis$/, "$1/{incidentID}/analysis")
     .replace(/(\/api\/v1\/incidents)\/[^/]+$/, "$1/{incidentID}");
 }
