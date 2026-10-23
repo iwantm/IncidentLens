@@ -33,6 +33,17 @@ export interface IncidentEvent {
   evidence?: Record<string, unknown>;
 }
 
+export interface InvestigationFinding {
+  rule_id: string;
+  title: string;
+  summary: string;
+  evidence_event_ids: string[];
+}
+
+export interface IncidentAnalysis {
+  findings: InvestigationFinding[];
+}
+
 export interface ListIncidentsOptions {
   namespace?: string;
   service?: string;
@@ -72,6 +83,16 @@ export function listIncidentEvents(
 ): Promise<IncidentEvent[]> {
   return getJSON<IncidentEvent[]>(
     `/api/v1/incidents/${encodeURIComponent(id)}/events`,
+    signal,
+  );
+}
+
+export function getIncidentAnalysis(
+  id: string,
+  signal?: AbortSignal,
+): Promise<IncidentAnalysis> {
+  return getJSON<IncidentAnalysis>(
+    `/api/v1/incidents/${encodeURIComponent(id)}/analysis`,
     signal,
   );
 }

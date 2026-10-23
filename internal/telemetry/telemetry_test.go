@@ -1,7 +1,10 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func TestSetupExportsOTelSignalsOverHTTP(t *testing.T) {
@@ -34,8 +38,10 @@ func TestSetupExportsOTelSignalsOverHTTP(t *testing.T) {
 		t.Fatalf("Setup() error = %v", err)
 	}
 
-	ctx, span := StartSpan(context.Background(), "test.operation")
-	span.End()
+	ctx, span := StartSpan(context.Background(), "test.operation", attribute.String("test.attribute", "value"))
+	EndSpan(span, errors.New("expected test span error"))
+	RecordIncidentAction(ctx, "open", "success")
+	RecordObservation(ctx, "deployment", "stored")
 	counter, err := otel.Meter("incident-lens-test").Int64Counter("test.operations")
 	if err != nil {
 		t.Fatalf("create test counter: %v", err)
@@ -55,6 +61,35 @@ func TestSetupExportsOTelSignalsOverHTTP(t *testing.T) {
 		if paths[path] == 0 {
 			t.Errorf("collector did not receive signal at %s; received paths: %#v", path, paths)
 		}
+	}
+}
+
+func TestMultiHandlerWithAttrsAndGroup(t *testing.T) {
+	var first, second bytes.Buffer
+	handler := multiHandler{
+		slog.NewJSONHandler(&first, nil),
+		slog.NewJSONHandler(&second, nil),
+	}
+	derived := handler.WithAttrs([]slog.Attr{slog.String("component", "test")}).WithGroup("group")
+	if !derived.Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("derived handler should accept info records")
+	}
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "test record", 0)
+	if err := derived.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if first.Len() == 0 || second.Len() == 0 {
+		t.Fatalf("both handlers should receive the record, got %q and %q", first.String(), second.String())
+	}
+}
+
+func TestMultiHandlerEnabledChecksConfiguredLevels(t *testing.T) {
+	handler := multiHandler{slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})}
+	if handler.Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("Enabled(info) = true for an error-only handler")
+	}
+	if !handler.Enabled(context.Background(), slog.LevelError) {
+		t.Fatal("Enabled(error) = false for an error-only handler")
 	}
 }
 

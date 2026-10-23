@@ -32,6 +32,7 @@ Retrieve lifecycle state and the ordered timeline with:
 GET /api/v1/incidents?namespace=incident-lens&status=open&limit=50&offset=0
 GET /api/v1/incidents/{incidentID}
 GET /api/v1/incidents/{incidentID}/events
+GET /api/v1/incidents/{incidentID}/analysis
 ```
 
 The incident list accepts optional `namespace`, `service`, `status` (`open` or `closed`), `from`, and `to` filters. `from` and `to` are RFC3339 timestamps and filter by incident start time. Results are ordered newest first with a stable ID tie-breaker. Pagination uses `limit` (default 50, maximum 200) and `offset` (default 0).
@@ -50,6 +51,10 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 Use `OTEL_TRACES_EXPORTER=none`, `OTEL_METRICS_EXPORTER=none`, or `OTEL_LOGS_EXPORTER=none` to disable an individual signal. You can also set a signal-specific endpoint such as `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. The service resource name defaults to `incident-lens-recorder`; standard resource environment variables such as `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` are read at startup. Without an endpoint or `OTEL_*_EXPORTER=otlp`, the recorder continues to run normally and emits JSON logs to stdout.
 
 Events and observations are stored separately: observations preserve what the watcher saw, while incident events provide the incident-specific timeline. A single observation may be associated with more than one matching open incident.
+
+### Deterministic investigation analysis
+
+The analysis endpoint evaluates the incident timeline using local rules and returns findings with `evidence_event_ids` that refer to the events in that timeline. The initial rules flag a matching Deployment pod-template change in the five minutes before the incident and selected Kubernetes warning events captured while it was active. The incident detail page displays these as investigation clues and links each one to its source event. Findings are recomputed from stored events on each request; they are not persisted and do not claim that an event caused the incident. Kubernetes Event evidence now includes `event_type` so newly observed events can be classified as `Warning` or `Normal`; older records without that field use an allowlist of warning reasons.
 
 ## Web console
 

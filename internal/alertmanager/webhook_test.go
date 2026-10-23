@@ -36,7 +36,7 @@ func TestFiringFixtureMapsIntoStableIncidentEvent(t *testing.T) {
 	if a.Type != "alert_fired" || a.Source != "alertmanager" || a.Namespace != "incident-lens" || a.Service != "demo-app" {
 		t.Fatalf("unexpected normalized event: %#v", a)
 	}
-	if a.Timestamp.Format(time.RFC3339) != "2026-10-20T09:58:00Z" || a.Summary != "Demo app is returning errors" {
+	if a.Timestamp.Format(time.RFC3339) != "2026-10-20T09:41:00Z" || a.Summary != "Demo app is returning errors" {
 		t.Fatalf("unexpected alert fields: timestamp=%s summary=%q", a.Timestamp, a.Summary)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/iwantm/IncidentLens/internal/alertmanager"
 	"github.com/iwantm/IncidentLens/internal/events"
+	"github.com/iwantm/IncidentLens/internal/investigation"
 	"github.com/iwantm/IncidentLens/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -56,6 +57,7 @@ func NewServer(store EventStore, readiness ...func(context.Context) error) *Serv
 	serv.mux.HandleFunc("GET /api/v1/incidents", serv.listIncidents)
 	serv.mux.HandleFunc("GET /api/v1/incidents/{incidentID}", serv.getIncident)
 	serv.mux.HandleFunc("GET /api/v1/incidents/{incidentID}/events", serv.listEvents)
+	serv.mux.HandleFunc("GET /api/v1/incidents/{incidentID}/analysis", serv.analyzeIncident)
 
 	return serv
 }
@@ -292,6 +294,34 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, events)
+}
+
+func (s *Server) analyzeIncident(w http.ResponseWriter, r *http.Request) {
+	incidentID := r.PathValue("incidentID")
+	if strings.TrimSpace(incidentID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "incident ID is required"})
+		return
+	}
+
+	incident, err := s.store.GetIncident(r.Context(), incidentID)
+	if err != nil {
+		if errors.Is(err, events.ErrIncidentNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
+			return
+		}
+		slog.ErrorContext(r.Context(), "failed to load incident for analysis", "incident_id", incidentID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not analyze incident"})
+		return
+	}
+
+	timeline, err := s.store.ListByIncident(r.Context(), incidentID)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "failed to load incident timeline for analysis", "incident_id", incidentID, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not analyze incident"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, investigation.Analyze(incident, timeline, time.Now().UTC()))
 }
 
 func validateEvent(event *events.Event) error {
